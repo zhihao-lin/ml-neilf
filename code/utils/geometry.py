@@ -163,7 +163,7 @@ def depth_map_to_position_map(depth_map, uv, extrinsic, intrinsic):
     points = np.transpose(points, [1, 0])                                   # [HW, 3]
     position_map = points.reshape([H, W, 3])                                # [H, W, 3]
 
-    mask_map = np.expand_dims((depth_map > EPS).astype(np.float), 2)        # [H, W, 1]
+    mask_map = np.expand_dims((depth_map > EPS).astype(np.float32), 2)        # [H, W, 1]
     position_map = position_map * mask_map
 
     return position_map

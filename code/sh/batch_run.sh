@@ -1,5 +1,5 @@
-DATA_ROOT=/mnt/data/ECCV_release_sample
-OUTPUT_ROOT=/home/ubuntu/yaoyao/codes/neilf_eccv_release/model
+DATA_ROOT=../../datasets/neilf
+OUTPUT_ROOT=../outputs
 GPU_INDEX=$2
 
 case $1 in

@@ -16,7 +16,7 @@ def split_neilf_input(input, total_pixels):
      Split the input to fit Cuda memory for large resolution.
      Can decrease the value of split_num in case of cuda out of memory error.
      '''
-    split_size = 1000
+    split_size = 100
     split_input = []
     split_indexes = torch.split(torch.arange(total_pixels).cuda(), split_size, dim=0)
     for indexes in split_indexes:

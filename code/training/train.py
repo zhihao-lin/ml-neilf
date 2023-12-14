@@ -3,6 +3,7 @@
 # Copyright (C) 2022 Apple Inc. All Rights Reserved.
 #
 import os
+os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 import argparse
 import sys
 sys.path.append('../code')
@@ -19,6 +20,7 @@ import torch
 
 # neilf
 from dataset.dataset import NeILFDataset
+from dataset.dataset_fipt import FIPTDataset
 from model.neilf_brdf import NeILFModel
 from model.loss import NeILFLoss
 import utils.io as io
@@ -142,8 +144,11 @@ class NeILFTrainer():
         # load input data and create dataset
         validation_indexes = config['eval']['validation_indexes']
         num_pixel_samples = config['train']['num_pixel_samples']
-        self.dataset = NeILFDataset(
-            input_folder, validation_indexes, num_pixel_samples, mode='train')
+        dataset = config['dataset']
+        # self.dataset = NeILFDataset(
+        #     input_folder, validation_indexes, num_pixel_samples, mode='train')
+        self.dataset = FIPTDataset(
+            input_folder, validation_indexes, num_pixel_samples, dataset=dataset, mode='train')
 
         # create training data loader
         self.train_dataloader = torch.utils.data.DataLoader(

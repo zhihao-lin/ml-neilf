@@ -4,9 +4,11 @@
 #
 import argparse
 import os
+os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
 import torch
 import numpy as np
 import imageio
+from matplotlib import pyplot as plt
 import json
 from collections import defaultdict
 
@@ -204,7 +206,11 @@ def evaluate(input_data_folder,
                 out_map[coord_mask] = valid_output[i]
                 out_map = out_map.reshape([*coord_shape, valid_output[i].shape[-1]])
                 out_prefix = f'{eval_folder}/{obj_name}_{brdf_name}.png'
-                imageio.imwrite(os.path.join(output_model_folder, out_prefix), out_map)
+                out_map = (out_map*255).astype(np.uint8)
+                if out_map.shape[-1] == 1:
+                    out_map = np.concatenate([out_map]*3, axis=-1)
+                # print('min: {}, max: {}'.format(out_map.min(), out_map.max()))
+                imageio.imwrite(out_prefix, out_map)
     
     # TODO: more evaluation options
     if eval_lighting: 

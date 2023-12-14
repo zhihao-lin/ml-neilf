@@ -3,36 +3,141 @@
 # Copyright (C) 2022 Apple Inc. All Rights Reserved.
 #
 import os
+os.environ["OPENCV_IO_ENABLE_OPENEXR"]="1"
+import json
 from glob import glob
 import torch
 import numpy as np
 import cv2
 from matplotlib import pyplot as plt
-from utils import io, geometry
 
-class NeILFDataset(torch.utils.data.Dataset):
+from utils import io, geometry
+from pathlib import Path
+
+def open_exr(file):
+    """ open image exr file """
+    img = cv2.imread(str(file),cv2.IMREAD_UNCHANGED)
+    if len(img.shape) == 3 and img.shape[2] == 3:
+        img = img[...,[2,1,0]]
+    img = img.astype(np.float32)
+    return img
+
+def load_fipt_synthetic_cams(path, scale=1.0, h=320, w=640):
+    with open(path, 'r') as f:
+        meta = json.load(f)
+    focal = (0.5*w/np.tan(0.5*meta['camera_angle_x'])).item()
+    intrinsic = np.array([
+        [focal, 0, w/2, 0], 
+        [0, focal, h/2, 0], 
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
+    n_frames = len(meta['frames'])
+    intrinsics = {str(i): intrinsic for i in range(n_frames)}
+    extrinsics = {}
+    for cur_idx in range(len(meta['frames'])):
+        frame = meta['frames'][cur_idx]
+        pose = np.array(frame['transform_matrix'])
+        # NOTE be careful about the camera convention
+        pose[:, :2] *= -1
+        extrinsics[str(cur_idx)] = pose
+    scale_mat = np.eye(4)
+    scale_mat[[0, 1, 2], [0, 1, 2]] = scale
+    image_list = {str(i): '{:0>5d}'.format(i) for i in range(n_frames)}
+    image_indexes = [str(i) for i in range(n_frames)]
+    image_resolution = [h, w]
+    return intrinsics, extrinsics, scale_mat, image_list, image_indexes, image_resolution
+
+def normalize_v(x) -> np.ndarray:
+    return x / np.linalg.norm(x)
+
+def read_cam_params(camFile: Path) -> list:
+    """ read open gl camera """
+    with open(str(camFile), 'r') as camIn:
+        cam_data = camIn.read().splitlines()
+    cam_num = int(cam_data[0])
+    cam_params = np.array([x.split(' ') for x in cam_data[1:]]).astype(np.float32)
+    assert cam_params.shape[0] == cam_num * 3
+    cam_params = np.split(cam_params, cam_num, axis=0) # [[origin, lookat, up], ...]
+    return cam_params
+
+def load_fipt_real_cams(cam_path, K_path, scale=1.0, h=360, w=540):
+    C2Ws_raw = read_cam_params(cam_path)
+    C2Ws = []
+    for i,c2w_raw in enumerate(C2Ws_raw):
+        origin, lookat, up = np.split(c2w_raw.T, 3, axis=1)
+        origin = origin.flatten()
+        lookat = lookat.flatten()
+        up = up.flatten()
+        at_vector = normalize_v(lookat - origin)
+        assert np.amax(np.abs(np.dot(at_vector.flatten(), up.flatten()))) < 2e-3 # two vector should be perpendicular
+
+        t = origin.reshape((3, 1)).astype(np.float32)
+        R = np.stack((np.cross(-up, at_vector), -up, at_vector), -1).astype(np.float32)
+        C2Ws.append(np.hstack((R, t)))
+    Ks = read_cam_params(K_path)
+    n_frames = len(C2Ws)
+    scale_mat = np.eye(4)
+    scale_mat[[0, 1, 2], [0, 1, 2]] = scale
+    image_indexes = [str(i) for i in range(n_frames)]
+    image_resolution = [h, w]
+    intrinsics = {}
+    extrinsics = {}
+    image_list = {}
+    for i in range(n_frames):
+        int = np.eye(4)
+        int[:3, :3] = Ks[i]
+        intrinsics[str(i)] = int
+        ext = np.eye(4)
+        ext[:3] = C2Ws[i]
+        extrinsics[str(i)] = ext
+        image_list[str(i)] = '{:0>5d}'.format(i)
+
+    return intrinsics, extrinsics, scale_mat, image_list, image_indexes, image_resolution
+
+class FIPTDataset(torch.utils.data.Dataset):
     """Dataset for a class of objects, where each datapoint is a SceneInstanceDataset."""
 
     def __init__(self,
                  data_folder,
                  validation_indexes,
                  num_pixel_samples,
+                 dataset='synthetic',
                  mode='train'
                  ):
 
         assert os.path.exists(data_folder), "Data directory is empty"
-        print ('NeILFDataset: loading data from: ' + data_folder)
+        print ('FIPTDataset: loading data from: ' + data_folder)
 
         self.data_folder = data_folder
         self.num_pixel_samples = num_pixel_samples
+        self.dataset = dataset
         self.mode = mode
         self.use_brdf_gt = False
         self.use_depth_map = False
 
         # load cameras
-        self.intrinsics, self.extrinsics, self.scale_mat, self.image_list, self.image_indexes, self.image_resolution = \
-            io.load_cams_from_sfmscene(f'{self.data_folder}/inputs/sfm_scene.json')
+        # self.intrinsics, self.extrinsics, self.scale_mat, self.image_list, self.image_indexes, self.image_resolution = \
+        #     io.load_cams_from_sfmscene(f'{self.data_folder}/inputs/sfm_scene.json')
+        
+        if dataset == 'synthetic':
+            cam_path = os.path.join(self.data_folder, 'inputs', 'transforms.json')
+            self.intrinsics, self.extrinsics, self.scale_mat, self.image_list, self.image_indexes, self.image_resolution =\
+                load_fipt_synthetic_cams(cam_path)
+        else: # real
+            cam_path = os.path.join(self.data_folder, 'inputs', 'cam.txt')
+            K_path   = os.path.join(self.data_folder, 'inputs', 'K_list.txt')
+            self.intrinsics, self.extrinsics, self.scale_mat, self.image_list, self.image_indexes, self.image_resolution =\
+                load_fipt_real_cams(cam_path, K_path)
+
         self.total_pixels = self.image_resolution[0] * self.image_resolution[1]
+        
+        # intrinsics: dict {'idx': (4, 4)}
+        # extrinsics: dict {'idx': (4, 4)}
+        # scale_mat: array (4, 4)
+        # image_list: dict {'idx': path}
+        # image_indexes: list ['idx']
+        # image_resolution: list [w, h]
 
         # # test
         # self.image_indexes = self.image_indexes[0:3]
@@ -47,6 +152,8 @@ class NeILFDataset(torch.utils.data.Dataset):
             image_index = self.image_indexes[i]
             if i in validation_list_indexes:
                 self.validation_indexes.append(image_index)
+                if dataset == 'synthetic':
+                    self.training_indexes.append(image_index)
             else:
                 self.training_indexes.append(image_index)
         self.num_validation_images = len(self.validation_indexes)
@@ -86,11 +193,14 @@ class NeILFDataset(torch.utils.data.Dataset):
         print ('NeILFDataset: loading validation data')
 
         # load validation views
+        if self.dataset == 'synthetic':
+            self.validation_indexes = self.training_indexes
+        # self.validation_indexes = self.training_indexes
         self._load_data_from_indexes(self.validation_indexes)
 
         # prepare validation data
         self.validation_data = []
-        for list_index in range(self.num_validation_images):
+        for list_index in range(len(self.validation_indexes)):
 
             validation_sample = {
                 'intrinsics': self.all_intrinsics[list_index],                                  # [1, 4, 4]
@@ -159,7 +269,8 @@ class NeILFDataset(torch.utils.data.Dataset):
         for list_index, image_index in enumerate(indexes_to_read):
 
             # paths
-            prefix = os.path.split(os.path.splitext(self.image_list[image_index])[0])[1]
+            prefix = self.image_list[image_index]
+            # print('prefix:', prefix)
             input_folder = os.path.join(self.data_folder, 'inputs')
 
             # only use depth map if there are depth maps but no position maps
@@ -197,8 +308,11 @@ class NeILFDataset(torch.utils.data.Dataset):
                     depth_map, self.uv, 
                     self.extrinsics[image_index], self.intrinsics[image_index])                 # [H, W, 3], [H, W, 1]
             else:
-                position_map = io.load_rgb_image_with_prefix(position_map_prefix)               # [H, W, 3]
-            normal_map = io.load_rgb_image_with_prefix(normal_map_prefix)                       # [H, W, 3]
+                position_map_path = position_map_prefix + '.exr' 
+                position_map = open_exr(position_map_path)               # [H, W, 3]
+
+            normal_map_path = normal_map_prefix + '.exr'
+            normal_map = open_exr(normal_map_path)                       # [H, W, 3]
 
             # read BRDF ground truth for evaluation
             if self.use_brdf_gt:
@@ -209,9 +323,11 @@ class NeILFDataset(torch.utils.data.Dataset):
                 metallic = metallic / 256                                                       # [H, W]
 
             # apply scale mat to camera
-            projection = self.intrinsics[image_index] @ self.extrinsics[image_index]            # [4, 4]
-            scaled_projection = (projection @ self.scale_mat)[0:3, 0:4]                         # [3, 4]    
-            intrinsic, pose = geometry.decompose_projection_matrix(scaled_projection)           # [4, 4], [4, 4]
+            # projection = self.intrinsics[image_index] @ self.extrinsics[image_index]            # [4, 4]
+            # scaled_projection = (projection @ self.scale_mat)[0:3, 0:4]                         # [3, 4]    
+            # intrinsic, pose = geometry.decompose_projection_matrix(scaled_projection)           # [4, 4], [4, 4]
+            intrinsic = self.intrinsics[image_index]
+            pose = self.extrinsics[image_index]
             self.all_intrinsics.append(torch.from_numpy(intrinsic).float().unsqueeze(0))        # [N][1, 4, 4]             
             self.all_poses.append(torch.from_numpy(pose).float().unsqueeze(0))                  # [N][1, 4, 4]
 
@@ -319,10 +435,11 @@ class NeILFDataset(torch.utils.data.Dataset):
     
 def test():
     import vedo
-    input_data_folder = '../../datasets/neilf/Preprocessed_DTU/DTU_scan97'
-    validation_indices = [] #[2,12,17,30,34]
+    input_data_folder = '../../datasets/neilf/fipt/real/conferenceroom'
+    dataset = 'real'
+    validation_indices = []
     num_pixel_samples = 8192
-    dataset = NeILFDataset(input_data_folder, validation_indices, num_pixel_samples, 'train')
+    dataset = FIPTDataset(input_data_folder, validation_indices, num_pixel_samples, dataset, 'train')
     poses = dataset.all_poses
     t = poses[:, :3, -1]
     norm = np.linalg.norm(t, axis=-1)
@@ -334,9 +451,11 @@ def test():
     # print('uv:', sample['uv'].shape)
     # print('positions:', sample['positions'].shape)
     # print('normals:', sample['normals'].shape)
-
+    
     print('poses:', poses.shape)
-    poses = poses[:, :3]
+    # print('poses[0]:\n', poses[0])
+    pick = [0, 1, 4]
+    poses = poses[pick, :3]
     pos = poses[:, :, -1]
     arrow_len, s = 1, 1
     x_end = pos + arrow_len * poses[:, :, 0]
@@ -347,6 +466,7 @@ def test():
     z = vedo.Arrows(pos, z_end, s=s, c='blue')
 
     vedo.show(x, y, z, axes=1)
+
 
 if __name__ == '__main__':
     test()
